@@ -1,51 +1,88 @@
-;; Tic Tac Toe Smart Contract
+;; ============================================
+;; Tic Tac Toe Smart Contract (Clarity 3)
+;; ============================================
 
-;; Track the next game ID
+;; --------------------
+;; Constants & Errors
+;; --------------------
+
+(define-constant ERR_MIN_BET_AMOUNT (err u100))
+(define-constant ERR_INVALID_MOVE (err u101))
+(define-constant ERR_GAME_NOT_FOUND (err u102))
+(define-constant ERR_GAME_CANNOT_BE_JOINED (err u103))
+(define-constant ERR_NOT_YOUR_TURN (err u104))
+(define-constant ERR_GAME_OVER (err u105))
+(define-constant ERR_PLAYER_MISSING (err u106))
+
+(define-constant MARK_EMPTY u0)
+(define-constant MARK_X u1)
+(define-constant MARK_O u2)
+
+(define-constant STATUS_WAITING u0)
+(define-constant STATUS_ACTIVE u1)
+(define-constant STATUS_FINISHED u2)
+
+;; --------------------
+;; Storage
+;; --------------------
+
 (define-data-var latest-game-id uint u0)
 
-;; Store all games
-(define-map games 
-    uint
-    { 
+(define-map games
+    { id: uint }
+    {
         player-one: principal,
         player-two: (optional principal),
-        is-player-one-turn: bool,
-        bet-amount: uint,
+        turn: principal,
+        bet: uint,
         board: (list 9 uint),
-        winner: (optional principal)
+        status: uint,
+        winner: (optional principal),
     }
 )
 
-;; Constants
-(define-constant THIS_CONTRACT (as-contract tx-sender))
-(define-constant ERR_MIN_BET_AMOUNT u100)
-(define-constant ERR_INVALID_MOVE u101)
-(define-constant ERR_GAME_NOT_FOUND u102)
-(define-constant ERR_GAME_CANNOT_BE_JOINED u103)
-(define-constant ERR_NOT_YOUR_TURN u104)
+;; --------------------
+;; Helpers
+;; --------------------
 
-;; Validate a move
-(define-private (validate-move (board (list 9 uint)) (move-index uint) (move uint))
-    (let (
-        (index-in-range (and (>= move-index u0) (< move-index u9)))
-        (x-or-o (or (is-eq move u1) (is-eq move u2)))
-        (empty-spot (is-eq (unwrap! (element-at? board move-index) false) u0))
+(define-private (empty-board)
+    (list
+        MARK_EMPTY         MARK_EMPTY         MARK_EMPTY
+        MARK_EMPTY         MARK_EMPTY         MARK_EMPTY
+        MARK_EMPTY         MARK_EMPTY         MARK_EMPTY
     )
-    (and (is-eq index-in-range true) (is-eq x-or-o true) empty-spot)
-))
+)
 
-;; Check if 3 cells form a winning line
-(define-private (is-line (board (list 9 uint)) (a uint) (b uint) (c uint)) 
-    (let (
-        (a-val (unwrap! (element-at? board a) false))
-        (b-val (unwrap! (element-at? board b) false))
-        (c-val (unwrap! (element-at? board c) false))
+(define-private (valid-move?
+        (board (list 9 uint))
+        (i uint)
     )
-    (and (is-eq a-val b-val) (is-eq a-val c-val) (not (is-eq a-val u0)))
-))
+    (and
+        (< i u9)
+        (is-eq (unwrap! (element-at? board i) false) MARK_EMPTY)
+    )
+)
 
-;; Check if someone won
-(define-private (has-won (board (list 9 uint))) 
+(define-private (is-line
+        (board (list 9 uint))
+        (a uint)
+        (b uint)
+        (c uint)
+    )
+    (let (
+            (av (unwrap! (element-at? board a) false))
+            (bv (unwrap! (element-at? board b) false))
+            (cv (unwrap! (element-at? board c) false))
+        )
+        (and
+            (is-eq av bv)
+            (is-eq av cv)
+            (not (is-eq av MARK_EMPTY))
+        )
+    )
+)
+
+(define-private (has-won (board (list 9 uint)))
     (or
         (is-line board u0 u1 u2)
         (is-line board u3 u4 u5)
@@ -58,90 +95,168 @@
     )
 )
 
-;; Create a new game
-(define-public (create-game (bet-amount uint) (move-index uint) (move uint))
-    (let (
-        (game-id (var-get latest-game-id))
-        (starting-board (list u0 u0 u0 u0 u0 u0 u0 u0 u0))
-        (game-board (unwrap! (replace-at? starting-board move-index move) (err ERR_INVALID_MOVE)))
-        (game-data {
-            player-one: contract-caller,
-            player-two: none,
-            is-player-one-turn: false,
-            bet-amount: bet-amount,
-            board: game-board,
-            winner: none
-        })
+(define-private (board-full? (board (list 9 uint)))
+    (is-none (index-of board MARK_EMPTY))
+)
+
+;; --------------------
+;; Public Functions
+;; --------------------
+
+(define-public (create-game
+        (bet uint)
+        (move-index uint)
     )
+    (begin
+        (asserts! (> bet u0) ERR_MIN_BET_AMOUNT)
+        (asserts! (valid-move? (empty-board) move-index) ERR_INVALID_MOVE)
 
-    (asserts! (> bet-amount u0) (err ERR_MIN_BET_AMOUNT))
-    (asserts! (is-eq move u1) (err ERR_INVALID_MOVE))
-    (asserts! (validate-move starting-board move-index move) (err ERR_INVALID_MOVE))
+        (try! (as-contract (stx-transfer? bet tx-sender tx-sender)))
 
-    (try! (stx-transfer? bet-amount contract-caller THIS_CONTRACT))
-    (map-set games game-id game-data)
-    (var-set latest-game-id (+ game-id u1))
+        (let (
+                (id (var-get latest-game-id))
+                (board (unwrap! (replace-at? (empty-board) move-index MARK_X)
+                    ERR_INVALID_MOVE
+                ))
+            )
+            (map-set games { id: id } {
+                player-one: tx-sender,
+                player-two: none,
+                turn: tx-sender,
+                bet: bet,
+                board: board,
+                status: STATUS_WAITING,
+                winner: none,
+            })
 
-    (print { action: "create-game", data: game-data})
-    (ok game-id)
-))
+            (var-set latest-game-id (+ id u1))
 
-;; Join an existing game
-(define-public (join-game (game-id uint) (move-index uint) (move uint))
-    (let (
-        (original-game-data (unwrap! (map-get? games game-id) (err ERR_GAME_NOT_FOUND)))
-        (original-board (get board original-game-data))
-        (game-board (unwrap! (replace-at? original-board move-index move) (err ERR_INVALID_MOVE)))
-        (game-data (merge original-game-data {
-            board: game-board,
-            player-two: (some contract-caller),
-            is-player-one-turn: true
-        }))
+            (print {
+                event: "game-created",
+                game-id: id,
+                player: tx-sender,
+                bet: bet,
+            })
+
+            (ok id)
+        )
     )
+)
 
-    (asserts! (is-none (get player-two original-game-data)) (err ERR_GAME_CANNOT_BE_JOINED)) 
-    (asserts! (is-eq move u2) (err ERR_INVALID_MOVE))
-    (asserts! (validate-move original-board move-index move) (err ERR_INVALID_MOVE))
-
-    (try! (stx-transfer? (get bet-amount original-game-data) contract-caller THIS_CONTRACT))
-    (map-set games game-id game-data)
-
-    (print { action: "join-game", data: game-data})
-    (ok game-id)
-))
-
-;; Make a move
-(define-public (play (game-id uint) (move-index uint) (move uint))
-    (let (
-        (original-game-data (unwrap! (map-get? games game-id) (err ERR_GAME_NOT_FOUND)))
-        (original-board (get board original-game-data))
-        (is-player-one-turn (get is-player-one-turn original-game-data))
-        (player-turn (if is-player-one-turn (get player-one original-game-data) (unwrap! (get player-two original-game-data) (err ERR_GAME_NOT_FOUND))))
-        (expected-move (if is-player-one-turn u1 u2))
-        (game-board (unwrap! (replace-at? original-board move-index move) (err ERR_INVALID_MOVE)))
-        (is-now-winner (has-won game-board))
-        (game-data (merge original-game-data {
-            board: game-board,
-            is-player-one-turn: (not is-player-one-turn),
-            winner: (if is-now-winner (some player-turn) none)
-        }))
+(define-public (join-game
+        (game-id uint)
+        (move-index uint)
     )
+    (let ((g (unwrap! (map-get? games { id: game-id }) ERR_GAME_NOT_FOUND)))
+        (asserts! (is-eq (get status g) STATUS_WAITING) ERR_GAME_CANNOT_BE_JOINED)
+        (asserts! (is-none (get player-two g)) ERR_GAME_CANNOT_BE_JOINED)
+        (asserts! (valid-move? (get board g) move-index) ERR_INVALID_MOVE)
 
-    (asserts! (is-eq player-turn contract-caller) (err ERR_NOT_YOUR_TURN))
-    (asserts! (is-eq move expected-move) (err ERR_INVALID_MOVE))
-    (asserts! (validate-move original-board move-index move) (err ERR_INVALID_MOVE))
+        (try! (as-contract (stx-transfer? (get bet g) tx-sender tx-sender)))
 
-    (if is-now-winner (try! (as-contract (stx-transfer? (* u2 (get bet-amount game-data)) tx-sender player-turn))) false)
+        (let ((board (unwrap! (replace-at? (get board g) move-index MARK_O)
+                ERR_INVALID_MOVE
+            )))
+            (map-set games { id: game-id }
+                (merge g {
+                    player-two: (some tx-sender),
+                    board: board,
+                    turn: (get player-one g),
+                    status: STATUS_ACTIVE,
+                })
+            )
 
-    (map-set games game-id game-data)
+            (print {
+                event: "game-joined",
+                game-id: game-id,
+                player: tx-sender,
+            })
 
-    (print {action: "play", data: game-data})
-    (ok game-id)
-))
+            (ok game-id)
+        )
+    )
+)
 
-;; Read-only functions
+(define-public (play
+        (game-id uint)
+        (move-index uint)
+    )
+    (let ((g (unwrap! (map-get? games { id: game-id }) ERR_GAME_NOT_FOUND)))
+        (asserts! (is-eq (get status g) STATUS_ACTIVE) ERR_GAME_OVER)
+        (asserts! (is-eq tx-sender (get turn g)) ERR_NOT_YOUR_TURN)
+        (asserts! (valid-move? (get board g) move-index) ERR_INVALID_MOVE)
+
+        (let ((mark (if (is-eq tx-sender (get player-one g))
+                MARK_X
+                MARK_O
+            )))
+            (let ((board (unwrap! (replace-at? (get board g) move-index mark)
+                    ERR_INVALID_MOVE
+                )))
+                (let ((won (has-won board)))
+                    (let ((draw (and (not won) (board-full? board))))
+                        (let ((next (if (is-eq tx-sender (get player-one g))
+                                (unwrap! (get player-two g) ERR_PLAYER_MISSING)
+                                (get player-one g)
+                            )))
+                            (map-set games { id: game-id }
+                                (merge g {
+                                    board: board,
+                                    turn: next,
+                                    status: (if (or won draw)
+                                        STATUS_FINISHED
+                                        STATUS_ACTIVE
+                                    ),
+                                    winner: (if won
+                                        (some tx-sender)
+                                        none
+                                    ),
+                                })
+                            )
+
+                            ;; payout
+                            (if won
+                                (try! (as-contract (stx-transfer? (* u2 (get bet g)) tx-sender
+                                    tx-sender
+                                )))
+                                (if draw
+                                    (begin
+                                        (try! (as-contract (stx-transfer? (get bet g) tx-sender
+                                            (get player-one g)
+                                        )))
+                                        (try! (as-contract (stx-transfer? (get bet g) tx-sender
+                                            (unwrap! (get player-two g)
+                                                ERR_PLAYER_MISSING
+                                            ))))
+                                        true
+                                    )
+                                    true
+                                )
+                            )
+
+                            (print {
+                                event: "move-played",
+                                game-id: game-id,
+                                player: tx-sender,
+                                won: won,
+                                draw: draw,
+                            })
+
+                            (ok game-id)
+                        )
+                    )
+                )
+            )
+        )
+    )
+)
+
+;; --------------------
+;; Read-only
+;; --------------------
+
 (define-read-only (get-game (game-id uint))
-    (map-get? games game-id)
+    (map-get? games { id: game-id })
 )
 
 (define-read-only (get-latest-game-id)
